@@ -7,7 +7,8 @@ from torch.nn import functional as F
 
 from src.models.layers import LinearNorm, ConvNorm
 
-
+# The resulting mask indicates which positions within each sequence are considered valid (within the given lengths) and which positions are considered invalid (beyond the given lengths).
+# if len = [2,3,5] mask --> [[t,t,f,f,f],[t,t,t,f,f],[t,t,t,t,t]]
 def get_mask_from_lengths(lengths):
     max_len = torch.max(lengths).item()
     ids = torch.arange(0, max_len).to(lengths.device)
@@ -15,6 +16,8 @@ def get_mask_from_lengths(lengths):
     return mask
 
 
+# this for conv it's output is a flatten array 
+# it's gives same x,y dim but change the number of attention filters to attention dimensions 
 class LocationLayer(nn.Module):
     def __init__(self, attention_n_filters, attention_kernel_size,
                  attention_dim):
@@ -40,18 +43,21 @@ class Attention(nn.Module):
                  attention_location_n_filters, attention_location_kernel_size):
         super(Attention, self).__init__()
         # 将 query 即 decoder 的输出变换维度
+#          A linear layer that transforms the decoder's output (query) from attention_rnn_dim to attention_dim dimensions
         self.query_layer = LinearNorm(attention_rnn_dim, attention_dim,
                                       bias=False, w_init_gain='tanh')
 
         # 将 memory 即 encoder的输出变换维度
+#          A linear layer that transforms the encoder's output (memory) from attention_rnn_dim to attention_dim dimensions
         self.memory_layer = LinearNorm(embedding_dim, attention_dim, bias=False,
                                        w_init_gain='tanh')
+#      A linear layer that maps the attention dimension (attention_dim) to a scalar value (1) for each time step. 
         self.v = LinearNorm(attention_dim, 1, bias=False)
         self.location_layer = LocationLayer(attention_location_n_filters,
                                             attention_location_kernel_size,
                                             attention_dim)
         self.score_mask_value = -float("inf")
-
+# These energies indicate the relevance or importance of each time step in the input sequence for the current decoding step. like nlp example in lec
     def get_alignment_energies(self, query, processed_memory,
                                attention_weights_cat):
         """
@@ -74,7 +80,8 @@ class Attention(nn.Module):
         # energies [B,T,1]
         energies = energies.squeeze(-1)
         return energies
-
+    
+# computes the attention context vector and attention weights based on the provided inputs. 
     def forward(self, attention_hidden_state, memory, processed_memory,
                 attention_weights_cat, mask):
         """
@@ -98,7 +105,8 @@ class Attention(nn.Module):
 
         return attention_context, attention_weights
 
-
+# the Prenet module applies a series of linear transformations with ReLU activation and dropout to the input tensor. 
+# It helps extract relevant features from the input before passing it to the main network, providing a non-linear transformation and regularization.
 class Prenet(nn.Module):
     def __init__(self, in_dim, sizes):
         super(Prenet, self).__init__()
@@ -113,6 +121,8 @@ class Prenet(nn.Module):
         return x
 
 
+# class represents the postnet module, which is a stack of 1-dimensional convolutions used for post-processing the outputs of a speech synthesis model.
+# The postnet helps refine the predicted mel-spectrogram by adding fine-grained details and reducing potential artifacts.    
 class Postnet(nn.Module):
     """Postnet
         - Five 1-d convolution with 512 channels and kernel size 5
@@ -121,7 +131,10 @@ class Postnet(nn.Module):
     def __init__(self, config):
         super(Postnet, self).__init__()
         self.convolutions = nn.ModuleList()
-
+        'The first convolutional layer is defined using ConvNorm and nn.BatchNorm1d. 
+        'It takes the mel-spectrogram channels as input (config.n_mel_channels) and applies a 1-dimensional 
+        'convolution with config.postnet_embedding_dim output channels and a kernel size of config.postnet_kernel_size. 
+        'The output of this convolution is then passed through batch normalization.'
         self.convolutions.append(
             nn.Sequential(
                 ConvNorm(config.n_mel_channels, config.postnet_embedding_dim,
@@ -130,6 +143,8 @@ class Postnet(nn.Module):
                          dilation=1, w_init_gain='tanh'),
                 nn.BatchNorm1d(config.postnet_embedding_dim))
         )
+
+        # For the intermediate convolutions, the same pattern is followed: 1-dimensional convolution, batch normalization, and activation function (tanh)
 
         for i in range(1, config.postnet_n_convolutions - 1):
             self.convolutions.append(
@@ -141,7 +156,9 @@ class Postnet(nn.Module):
                              dilation=1, w_init_gain='tanh'),
                     nn.BatchNorm1d(config.postnet_embedding_dim))
             )
-
+"The last convolutional layer applies a 1-dimensional convolution with config.postnet_embedding_dim input channels and config.n_mel_channels output channels.
+"The kernel size and padding are determined by config.postnet_kernel_size.
+"The activation function used here is linear, and batch normalization is applied."
         self.convolutions.append(
             nn.Sequential(
                 ConvNorm(config.postnet_embedding_dim, config.n_mel_channels,
@@ -150,10 +167,12 @@ class Postnet(nn.Module):
                          dilation=1, w_init_gain='linear'),
                 nn.BatchNorm1d(config.n_mel_channels))
         )
-
+#  forward is applay the multi conv layers takes an input tensor x and processes it through the convolutional layers.
     def forward(self, x):
         for i in range(len(self.convolutions) - 1):
+#             For each convolutional layer except the last one, the input tensor x is passed through the convolution, followed by the tanh activation function and dropout (F.dropout).
             x = F.dropout(torch.tanh(self.convolutions[i](x)), 0.5, self.training)
+#     For the last convolutional layer, only the convolution and dropout are applied, without the tanh activation.
         x = F.dropout(self.convolutions[-1](x), 0.5, self.training)
 
         return x
